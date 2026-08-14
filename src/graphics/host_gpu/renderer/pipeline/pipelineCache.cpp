@@ -131,9 +131,22 @@ PipelineCache::GraphicsPipeline& PipelineCache::CreateGraphicsPipeline(
 	}
 
 	const auto& clip_control = ctx.GetClipControl();
-	EXIT_NOT_IMPLEMENTED(!clip_control.IsZClipModeRepresentable());
 	static_params.negative_one_to_one = !clip_control.dx_clip_space;
-	static_params.depth_clip_enable   = clip_control.IsZClipEnabled();
+	if (clip_control.IsZClipModeRepresentable()) {
+		static_params.depth_clip_enable  = clip_control.IsZClipEnabled();
+		static_params.depth_clamp_enable = !static_params.depth_clip_enable;
+	} else {
+		// Vulkan exposes a single native near/far depth-clip switch. Disable both native planes,
+		// clamp depth, and reproduce the still-enabled guest plane with gl_ClipDistance[0].
+		static_params.depth_clip_enable  = false;
+		static_params.depth_clamp_enable = true;
+		if (clip_control.min_z_clip_disable) {
+			static_params.synthetic_depth_clip = 1; // far: w - z
+		} else {
+			static_params.synthetic_depth_clip = clip_control.dx_clip_space ? 2 : 3;
+			// near DX: z; near OpenGL: z + w
+		}
+	}
 	static_params.topology            = topology;
 	static_params.samples             = attachment_samples;
 	static_params.sample_shading_enable =

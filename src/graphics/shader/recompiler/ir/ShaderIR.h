@@ -127,6 +127,11 @@ struct MemoryInfo {
 	// exact scalar definitions reaching this instruction before that patching step.
 	uint32_t resource_source = 0;
 	uint32_t sampler_source  = 0;
+	// GPU-selected image descriptors are loaded from a guest table with a byte offset. Preserve
+	// the live offset operand after dense resource patching so SPIR-V can index the corresponding
+	// Vulkan descriptor array instead of trying to materialize one descriptor on the CPU.
+	Operand  dynamic_resource_offset;
+	uint32_t dynamic_resource_base_offset = 0;
 	bool     data_signed     = false;
 	bool     typed           = false;
 	bool     formatted       = false;
@@ -155,13 +160,19 @@ struct ExportInfo {
 };
 
 struct InputInfo {
-	uint32_t attr = 0;
-	uint32_t chan = 0;
+	uint32_t attr         = 0;
+	uint32_t chan         = 0;
+	uint32_t vertex_index = UINT32_MAX;
 
 	bool operator==(const InputInfo& other) const = default;
 };
 
 enum class SaveexecMode { And, Orn2, Andn1 };
+
+// RDNA2 exposes separate outstanding-operation counters. Keep the encoded wait
+// class through IR lowering so the SPIR-V backend does not confuse an LDS wait
+// with a VM, export, store, or dependency wait.
+enum class WaitcntKind { Packed, Vscnt, Vmcnt, Expcnt, Lgkmcnt, Depctr };
 
 struct Instruction {
 	uint32_t     pc = 0;
@@ -176,6 +187,7 @@ struct Instruction {
 	ExportInfo   export_info;
 	InputInfo    input_info;
 	SaveexecMode saveexec_mode = SaveexecMode::And;
+	WaitcntKind  waitcnt_kind  = WaitcntKind::Packed;
 
 	bool operator==(const Instruction& other) const = default;
 };
@@ -224,6 +236,7 @@ enum class ScalarValueOp {
 	AddShiftLeft,
 	XorAdd,
 	ShiftLeftOr,
+	FindLsbU32,
 	ReadConst,
 	ReadConstBuffer,
 	Phi,
@@ -294,20 +307,35 @@ struct BufferResource {
 
 enum class ImageMipMode { None, DynamicStorage };
 
+// Native image descriptors encode mip levels in four bits. Dynamic storage-image
+// operations therefore need at most one Vulkan descriptor per possible guest mip.
+constexpr uint32_t MaxStorageImageMipLevels = 16;
+
 constexpr uint32_t StorageImageIdentitySwizzle = 0x00000facu;
 
 struct ImageResource {
+	static constexpr uint32_t NoDynamicTable = UINT32_MAX;
+
 	uint32_t                source          = 0;
 	uint32_t                first_use_pc    = 0;
 	ResourceKind            kind            = ResourceKind::None;
 	Decoder::ImageDimension dimension       = Decoder::ImageDimension::Unknown;
 	ImageMipMode            mip_mode        = ImageMipMode::None;
 	uint32_t                storage_swizzle = StorageImageIdentitySwizzle;
+	uint32_t                dynamic_table_source = ScalarProvenance::Undefined;
+	uint32_t                dynamic_table_buffer = NoDynamicTable;
+	uint32_t                dynamic_table_address_offset = 0;
+	uint32_t                dynamic_table_address_count = 0;
+	uint32_t                dynamic_descriptor_count = 0;
 	bool                    read            = false;
 	bool                    written         = false;
 	bool                    atomic          = false;
 	bool                    depth_compare   = false;
 	bool                    cube            = false;
+
+	[[nodiscard]] bool HasDynamicTable() const {
+		return dynamic_table_buffer != NoDynamicTable || dynamic_table_address_count != 0;
+	}
 
 	bool operator==(const ImageResource& other) const = default;
 };
@@ -359,6 +387,7 @@ struct StageInput {
 	uint32_t       location        = 0;
 	uint32_t       component_count = 1;
 	std::string    debug_name;
+	bool           per_vertex = false;
 
 	bool operator==(const StageInput& other) const = default;
 };
@@ -450,6 +479,15 @@ struct ShaderInfo {
 	bool operator==(const ShaderInfo& other) const = default;
 };
 
+struct ComputeSubgroupAnalysis {
+	uint32_t local_threads                 = 0;
+	bool     complete                      = false;
+	bool     requires_exact_subgroup       = false;
+	bool     half_wave_separable           = false;
+	bool     logical_single_wave_supported = false;
+	bool     logical_multi_wave_supported  = false;
+};
+
 struct Program {
 	ShaderType              stage               = ShaderType::Unknown;
 	ShaderLaneMaskMode      lane_mask_mode      = ShaderLaneMaskMode::NativeWave;
@@ -457,6 +495,10 @@ struct Program {
 	uint32_t                wave_size           = 64;
 	uint32_t                user_data_base      = 0;
 	uint32_t                user_data_count     = 64;
+	bool                    compute_linear_local64 = false;
+	int32_t                 compute_workgroup_register = -1;
+	int32_t                 compute_thread_ids_num     = 0;
+	ComputeSubgroupAnalysis compute_subgroup;
 	bool                    dispatcher_fallback = false;
 	CFG::FailureKind        cfg_failure_kind    = CFG::FailureKind::None;
 	std::string             fallback_reason;

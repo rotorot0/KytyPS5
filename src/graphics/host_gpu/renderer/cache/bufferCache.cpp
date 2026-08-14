@@ -52,6 +52,27 @@ void BufferCache::Upload(CommandBuffer& command, Buffer& destination, uint64_t d
 	}
 }
 
+void BufferCache::UploadGuestBacking(CommandBuffer& command, Buffer& destination,
+	                                 uint64_t destination_offset, uint64_t source_address,
+	                                 uint64_t size) {
+	while (size != 0) {
+		const auto chunk = std::min(size, m_staging_buffer.Size());
+		const auto [mapped, stage_offset] = m_staging_buffer.Map(chunk, 4);
+		if (mapped == nullptr ||
+		    !Libs::LibKernel::Memory::TryReadGpuBacking(source_address, mapped, chunk)) {
+			EXIT("BufferCache: guest backing upload failed, addr=0x%016" PRIx64
+			     " size=0x%016" PRIx64 "\n",
+			     source_address, chunk);
+		}
+		m_staging_buffer.Commit();
+		destination.CopyFrom(command, m_staging_buffer, stage_offset, destination_offset, chunk,
+		                     vk::AccessFlagBits::eHostWrite);
+		source_address += chunk;
+		destination_offset += chunk;
+		size -= chunk;
+	}
+}
+
 bool BufferCache::ResolveOverlap(CacheRange& merged, CacheRange candidate) noexcept {
 	if (merged.address == 0 || merged.size == 0 || candidate.address == 0 || candidate.size == 0 ||
 	    merged.size > UINT64_MAX - merged.address ||
@@ -445,8 +466,8 @@ BufferCache::CachedBuffer& BufferCache::GetOrCreateBuffer(CommandBuffer& command
 		    },
 		    [&]() noexcept {
 			    for (const auto& [address, bytes]: uploads) {
-				    Upload(command, *old.buffer, old.buffer->Offset(address),
-				           reinterpret_cast<const void*>(address), bytes);
+				    UploadGuestBacking(command, *old.buffer, old.buffer->Offset(address), address,
+				                       bytes);
 			    }
 		    });
 	}
@@ -486,14 +507,14 @@ BufferBinding BufferCache::ObtainBuffer(CommandBuffer& command, uint64_t vaddr, 
 		    m_graphics.physical_device_properties.limits.minUniformBufferOffsetAlignment, 1);
 		if (auto [mapped, offset] = m_stream_buffer.Map(size, alignment, false);
 		    mapped != nullptr) {
-			if (Libs::LibKernel::Memory::TryReadBacking(vaddr, mapped, size)) {
+			if (Libs::LibKernel::Memory::TryReadGpuBacking(vaddr, mapped, size)) {
 				m_stream_buffer.Commit();
 				return {{}, m_stream_buffer.Handle(), offset};
 			}
 		} else {
 			auto owner = std::make_shared<Buffer>(m_graphics, m_scheduler, MemoryUsage::Upload, 0,
 			                                      AllFlags, size);
-			if (Libs::LibKernel::Memory::TryReadBacking(vaddr, owner->Mapped().data(), size)) {
+			if (Libs::LibKernel::Memory::TryReadGpuBacking(vaddr, owner->Mapped().data(), size)) {
 				owner->Flush(0, size);
 				return {owner, owner->Handle(), 0};
 			}
@@ -511,8 +532,8 @@ BufferBinding BufferCache::ObtainBuffer(CommandBuffer& command, uint64_t vaddr, 
 	    [&](uint64_t address, uint64_t bytes) noexcept { uploads.emplace_back(address, bytes); },
 	    [&]() noexcept {
 		    for (const auto& [address, bytes]: uploads) {
-			    Upload(command, *cached.buffer, cached.buffer->Offset(address),
-			           reinterpret_cast<const void*>(address), bytes);
+			    UploadGuestBacking(command, *cached.buffer, cached.buffer->Offset(address), address,
+			                       bytes);
 		    }
 	    });
 	if (is_written) {
@@ -524,6 +545,22 @@ BufferBinding BufferCache::ObtainBuffer(CommandBuffer& command, uint64_t vaddr, 
 		(void)SynchronizeBufferFromImage(*owner, vaddr, size);
 	}
 	return {owner, owner->Handle(), offset};
+}
+
+void BufferCache::PrepareBufferRanges(CommandBuffer& command,
+                                      std::span<const BufferRange> ranges) {
+	if (command.IsInvalid() || command.IsExecute()) {
+		EXIT("BufferCache: buffer range preparation requires a recording command buffer\n");
+	}
+	for (const auto& range: ranges) {
+		if (range.address != 0 && range.size != 0) {
+			if (range.address >= TRACKER_ADDRESS_SIZE ||
+			    range.size > TRACKER_ADDRESS_SIZE - range.address) {
+				EXIT("BufferCache: invalid prepared buffer range\n");
+			}
+			(void)GetOrCreateBuffer(command, range.address, range.size);
+		}
+	}
 }
 
 std::shared_ptr<Buffer> BufferCache::ObtainNullBuffer() {
@@ -621,8 +658,19 @@ ImageBufferSource BufferCache::ObtainBufferForImage(uint64_t vaddr, uint64_t siz
 	}
 
 	auto [staging, stage_offset] = m_staging_buffer.Map(size, 16);
-	if (staging == nullptr || !Libs::LibKernel::Memory::TryReadBacking(vaddr, staging, size)) {
-		EXIT("BufferCache: failed to read mapped guest image backing\n");
+	if (staging == nullptr) {
+		EXIT("BufferCache: failed to allocate image staging range: addr=0x%016" PRIx64
+		     " size=0x%016" PRIx64 "\n",
+		     vaddr, size);
+	}
+	if (!Libs::LibKernel::Memory::TryReadGpuBacking(vaddr, staging, size)) {
+		EXIT("BufferCache: failed to read mapped guest image backing: addr=0x%016" PRIx64
+		     " size=0x%016" PRIx64 " cpu_modified=%s gpu_modified=%s dirty_ranges=%" PRIu64
+		     " native_owner=%s\n",
+		     vaddr, size, m_memory_tracker.IsRegionCpuModified(vaddr, size) ? "true" : "false",
+		     m_memory_tracker.IsRegionGpuModified(vaddr, size) ? "true" : "false",
+		     static_cast<uint64_t>(m_gpu_modified_ranges.Intersections(vaddr, size).size()),
+		     find_owner() != m_buffers.end() ? "true" : "false");
 	}
 	m_staging_buffer.Commit();
 
@@ -802,6 +850,29 @@ bool BufferCache::IsRegionGpuModified(uint64_t vaddr, uint64_t size) {
 
 bool BufferCache::HasGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
 	return !m_gpu_modified_ranges.Intersections(vaddr, size).empty();
+}
+
+void BufferCache::DiscardGpuDirtyBytes(uint64_t vaddr, uint64_t size) {
+	if (vaddr == 0 || size == 0 || vaddr >= TRACKER_ADDRESS_SIZE ||
+	    size > TRACKER_ADDRESS_SIZE - vaddr) {
+		EXIT("BufferCache: invalid GPU-dirty discard range\n");
+	}
+	if (!HasGpuDirtyBytes(vaddr, size)) {
+		return;
+	}
+
+	// MemoryTracker records GPU ownership at tracker-page granularity while RangeSet retains
+	// exact byte ownership. Rebuild the affected page envelope after removing the image range so
+	// dirty buffer siblings on either edge remain protected and downloadable.
+	const auto page_begin = vaddr & ~(TRACKER_PAGE_SIZE - 1u);
+	const auto range_end  = vaddr + size;
+	const auto page_end = std::min<uint64_t>(
+	    (range_end + TRACKER_PAGE_SIZE - 1u) & ~(TRACKER_PAGE_SIZE - 1u), TRACKER_ADDRESS_SIZE);
+	m_gpu_modified_ranges.Subtract(vaddr, size);
+	m_memory_tracker.UnmarkRegionAsGpuModified(page_begin, page_end - page_begin);
+	for (const auto range: m_gpu_modified_ranges.Intersections(page_begin, page_end - page_begin)) {
+		m_memory_tracker.MarkRegionAsGpuModified(range.address, range.size);
+	}
 }
 
 bool BufferCache::IsRegionCpuModified(uint64_t vaddr, uint64_t size) {

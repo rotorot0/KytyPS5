@@ -244,6 +244,7 @@ enum class Opcode {
 	VCvtPknormI16F32,
 	VCvtPknormU16F32,
 	VCvtPkU16U32,
+	VCvtPkI16I32,
 	VPkMadI16,
 	VPkMulLoU16,
 	VPkAddI16,
@@ -425,6 +426,7 @@ enum class Opcode {
 	TBufferStoreFormatXyz,
 	TBufferStoreFormatXyzw,
 	BufferAtomicSwap,
+	BufferAtomicCmpSwap,
 	BufferAtomicAdd,
 	BufferAtomicSub,
 	BufferAtomicSMin,
@@ -523,6 +525,7 @@ enum class Opcode {
 
 	SNop,
 	SWaitcnt,
+	SWaitcntDepctr,
 	SBarrier,
 	SBranch,
 	SCbranchScc0,
@@ -536,6 +539,7 @@ enum class Opcode {
 	SSleep,
 	STtraceData,
 	SInstPrefetch,
+	SSceBreak,
 	SEndpgm,
 	Exp
 };

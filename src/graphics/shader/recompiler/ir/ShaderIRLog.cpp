@@ -126,7 +126,26 @@ std::string InputInfoToString(Opcode op, const InputInfo& input) {
 	if (op != Opcode::LoadInputF32) {
 		return "";
 	}
-	return fmt::format(" ; input_attr={} input_chan={}", input.attr, input.chan);
+	return input.vertex_index == UINT32_MAX
+	           ? fmt::format(" ; input_attr={} input_chan={}", input.attr, input.chan)
+	           : fmt::format(" ; input_attr={} input_chan={} input_vertex={}", input.attr,
+	                         input.chan, input.vertex_index);
+}
+
+std::string WaitcntInfoToString(const Instruction& inst) {
+	if (inst.op != Opcode::Waitcnt) {
+		return "";
+	}
+	const char* kind = "packed";
+	switch (inst.waitcnt_kind) {
+		case WaitcntKind::Vscnt: kind = "vscnt"; break;
+		case WaitcntKind::Vmcnt: kind = "vmcnt"; break;
+		case WaitcntKind::Expcnt: kind = "expcnt"; break;
+		case WaitcntKind::Lgkmcnt: kind = "lgkmcnt"; break;
+		case WaitcntKind::Depctr: kind = "depctr"; break;
+		case WaitcntKind::Packed: break;
+	}
+	return fmt::format(" ; wait_kind={}", kind);
 }
 
 std::string TerminatorToString(const CFG::Terminator& term) {
@@ -170,6 +189,7 @@ std::string InstructionToString(const Instruction& inst) {
 	}
 	text += MemoryInfoToString(inst.memory);
 	text += InputInfoToString(inst.op, inst.input_info);
+	text += WaitcntInfoToString(inst);
 	return text;
 }
 

@@ -9,7 +9,9 @@
 #include "graphics/host_gpu/renderer/cache/textureCache.h"
 #include "graphics/host_gpu/vulkanCommon.h"
 #include "graphics/shader/shaderBindings.h"
+#include "graphics/shader/recompiler/ir/ShaderIR.h"
 
+#include <array>
 #include <map>
 #include <memory>
 #include <span>
@@ -17,13 +19,6 @@
 #include <vector>
 
 namespace Libs::Graphics {
-
-namespace ShaderRecompiler::IR {
-struct DescriptorValue;
-struct ImageResource;
-struct Program;
-struct ResourceSnapshot;
-} // namespace ShaderRecompiler::IR
 
 class CommandBuffer;
 struct DescriptorCacheTestAccess;
@@ -50,12 +45,16 @@ public:
 		ImageId                 image_id;
 		vk::ImageView           image_view = nullptr;
 		TextureCache::ImageDesc desc;
-		vk::ImageLayout         layout = vk::ImageLayout::eUndefined;
+		vk::ImageLayout         layout            = vk::ImageLayout::eUndefined;
+		uint32_t                storage_mip_count = 1;
+		std::array<vk::ImageView, ShaderRecompiler::IR::MaxStorageImageMipLevels>
+		    storage_mip_views {};
 	};
 
 	struct NativeDescriptors {
 		std::vector<BufferView>     buffers;
 		std::vector<TextureBinding> images;
+		std::vector<std::vector<TextureBinding>> image_tables;
 		std::vector<vk::Sampler>    samplers;
 		std::vector<BufferView>     addresses;
 		BufferView                  gds;
@@ -94,8 +93,9 @@ private:
 		int                next_free_pool = -1;
 	};
 
-	static vk::DescriptorImageInfo MakeImageInfo(const TextureBinding& texture);
-	void                           CreatePool();
+	static vk::DescriptorImageInfo MakeImageInfo(const TextureBinding& texture,
+	                                             uint32_t storage_mip = 0);
+	void                           CreatePool(const ShaderRecompiler::IR::Program& program);
 	VulkanDescriptorSet* Allocate(Stage stage, const ShaderRecompiler::IR::Program& program);
 	vk::DescriptorSetLayout
 	GetDescriptorSetLayoutInternal(Stage stage, const ShaderRecompiler::IR::Program& program);

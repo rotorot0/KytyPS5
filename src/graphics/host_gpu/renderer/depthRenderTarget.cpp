@@ -166,7 +166,10 @@ void RenderExecutor::ResolveRenderDepthTarget(uint64_t submit_id, RenderCommandB
 			DepthFatal("invalid depth view: base=%u last=%u", z.depth_view.slice_start,
 			           z.depth_view.slice_max);
 	}
-	if (rc.resummarize_enable || rc.copy_centroid || rc.copy_sample != 0 ||
+	// The SCE SDK defines RESUMMARIZE_ENABLE as an HTile summary update policy for touched
+	// tiles. Vulkan maintains equivalent host depth metadata internally, and dedicated guest
+	// resummarization draws are consumed before attachment resolution.
+	if (rc.copy_centroid || rc.copy_sample != 0 ||
 	    z.z_info.expclear_enabled || z.stencil_info.expclear_enabled ||
 	    z.z_info.partially_resident || z.stencil_info.partially_resident ||
 	    z.z_info.max_mip_level != 0 || z.depth_view.current_mip_level != 0 ||

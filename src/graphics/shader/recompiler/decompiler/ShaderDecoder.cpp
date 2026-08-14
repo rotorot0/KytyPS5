@@ -402,7 +402,7 @@ bool DecodeProgram(std::span<const uint32_t> code, Program& program, std::string
 		if (IsControlFlowBranch(inst.opcode)) {
 			branch_targets.insert(inst.branch_target);
 		}
-		if (inst.opcode == Opcode::SEndpgm &&
+		if ((inst.opcode == Opcode::SEndpgm || inst.opcode == Opcode::SSceBreak) &&
 		    (word_index >= code.size() || !branch_targets.contains(word_index * 4u))) {
 			return true;
 		}
@@ -646,6 +646,7 @@ std::string OpcodeToString(Opcode opcode) {
 		case Opcode::VCvtPknormI16F32: return "v_cvt_pknorm_i16_f32";
 		case Opcode::VCvtPknormU16F32: return "v_cvt_pknorm_u16_f32";
 		case Opcode::VCvtPkU16U32: return "v_cvt_pk_u16_u32";
+		case Opcode::VCvtPkI16I32: return "v_cvt_pk_i16_i32";
 		case Opcode::VPkMadI16: return "v_pk_mad_i16";
 		case Opcode::VPkMulLoU16: return "v_pk_mul_lo_u16";
 		case Opcode::VPkAddI16: return "v_pk_add_i16";
@@ -826,6 +827,7 @@ std::string OpcodeToString(Opcode opcode) {
 		case Opcode::TBufferStoreFormatXyz: return "tbuffer_store_format_xyz";
 		case Opcode::TBufferStoreFormatXyzw: return "tbuffer_store_format_xyzw";
 		case Opcode::BufferAtomicSwap: return "buffer_atomic_swap";
+		case Opcode::BufferAtomicCmpSwap: return "buffer_atomic_cmpswap";
 		case Opcode::BufferAtomicAdd: return "buffer_atomic_add";
 		case Opcode::BufferAtomicSub: return "buffer_atomic_sub";
 		case Opcode::BufferAtomicSMin: return "buffer_atomic_smin";
@@ -923,6 +925,7 @@ std::string OpcodeToString(Opcode opcode) {
 		case Opcode::VInterpMovF32: return "v_interp_mov_f32";
 		case Opcode::SNop: return "s_nop";
 		case Opcode::SWaitcnt: return "s_waitcnt";
+		case Opcode::SWaitcntDepctr: return "s_waitcnt_depctr";
 		case Opcode::SBarrier: return "s_barrier";
 		case Opcode::SBranch: return "s_branch";
 		case Opcode::SCbranchScc0: return "s_cbranch_scc0";
@@ -936,6 +939,7 @@ std::string OpcodeToString(Opcode opcode) {
 		case Opcode::SSleep: return "s_sleep";
 		case Opcode::STtraceData: return "s_ttracedata";
 		case Opcode::SInstPrefetch: return "s_inst_prefetch";
+		case Opcode::SSceBreak: return "_sce_break";
 		case Opcode::SEndpgm: return "s_endpgm";
 		case Opcode::Exp: return "exp";
 		case Opcode::Unsupported: return "unsupported";
@@ -1035,6 +1039,7 @@ std::string InstructionToString(const Instruction& inst) {
 			                                               OperandToString(inst.src1).c_str()));
 		case Opcode::SNop:
 		case Opcode::SWaitcnt:
+		case Opcode::SWaitcntDepctr:
 		case Opcode::SSleep:
 		case Opcode::SSendmsg:
 		case Opcode::STtraceData:
@@ -1044,6 +1049,8 @@ std::string InstructionToString(const Instruction& inst) {
 			                                               OperandToString(inst.src0).c_str()));
 		case Opcode::SBarrier:
 			return WithUnsupportedReason(inst, fmt::format("0x{:08x}: s_barrier", inst.pc));
+		case Opcode::SSceBreak:
+			return WithUnsupportedReason(inst, fmt::format("0x{:08x}: _SCE_BREAK()", inst.pc));
 		case Opcode::VNop:
 			return WithUnsupportedReason(inst, fmt::format("0x{:08x}: v_nop", inst.pc));
 		case Opcode::SEndpgm:
@@ -1118,6 +1125,7 @@ std::string InstructionToString(const Instruction& inst) {
 		case Opcode::TBufferStoreFormatXyz:
 		case Opcode::TBufferStoreFormatXyzw:
 		case Opcode::BufferAtomicSwap:
+		case Opcode::BufferAtomicCmpSwap:
 		case Opcode::BufferAtomicAdd:
 		case Opcode::BufferAtomicSub:
 		case Opcode::BufferAtomicSMin:
